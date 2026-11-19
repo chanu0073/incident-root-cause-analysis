@@ -61,7 +61,7 @@ git status --short               # should list the changed notebooks and new fil
 ## Re-running after a code update (server)
 Executed notebooks count as local changes, so a plain `git pull` is refused. Reset them first (the results are already on the laptop):
 ```bash
-git checkout -- notebooks reports && git pull
+git clean -fd reports && git checkout -- notebooks reports && git pull
 git log --oneline -1               # must match the latest commit on GitHub
 ```
 
