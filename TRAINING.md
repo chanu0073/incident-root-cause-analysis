@@ -41,13 +41,22 @@ Runs `notebooks/01 … 06` in order and saves the outputs inside the notebooks. 
 cd notebooks && ../.venv/bin/jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 04_ml_ranker.ipynb
 ```
 
-## 5. Send the results back
+## 5. Pack the results (nothing is pushed from the server)
 ```bash
-git add notebooks reports
-git commit -m "Add full training results"
-git push
+tar czf rca_results.tgz notebooks reports
+ls -lh rca_results.tgz
 ```
-`data/` and `models/` are git-ignored (large files); the numbers are saved in `reports/results/*.json` and inside the executed notebooks.
+The archive holds the executed notebooks and `reports/` (`results/*.json` + `figures/`). It is small (a few MB): `data/` and `models/` are not included.
+
+## 6. Bring them to the laptop (run on the laptop)
+```bash
+cd ~/Files/projects/rcaeval-lens
+scp <user>@<server>:<path-to>/incident-root-cause-analysis/rca_results.tgz .
+tar xzf rca_results.tgz          # overwrites notebooks/ and reports/ with the server's versions
+rm rca_results.tgz
+git status --short               # should list the changed notebooks and new files in reports/
+```
+(Or download `rca_results.tgz` with any file-transfer tool and extract it in the project folder.) Then tell Claude the results are in; it analyses them and writes the conclusions.
 
 ## If something fails
-Send me the last ~30 lines of the error output. A failed notebook does not affect the earlier ones.
+Copy the last ~30 lines of the error output to the laptop and paste them to Claude. A failed notebook does not affect the earlier ones.

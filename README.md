@@ -27,7 +27,7 @@ When a microservice system fails, find **which service caused it** and **what ki
 - **Bootstrap confidence intervals** for every claimed gain.
 
 ## Run it
-- **On a GPU server:** see [TRAINING.md](TRAINING.md).
+- **On a GPU server:** see [TRAINING.md](TRAINING.md). Results come back as an archive (`notebooks/` + `reports/`), not via git.
 - **Laptop (no traces):** run `make install data-light features-light notebooks`.
 
 ## Layout
