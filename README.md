@@ -16,15 +16,16 @@ When a microservice system fails, find **which service caused it** and **what ki
 | XGBoost ranker, culprit service never seen as a culprit | 0.944 | 0.993 | 0.970 |
 | 1D CNN on raw time series, grouped CV (3 seeds) | 0.930 | 0.981 | 0.959 |
 | XGBoost + CNN ensemble | 0.930 | 0.993 | 0.960 |
-| 1D CNN, unseen system (train on 2 systems, test on the 3rd) | 0.859 | 0.930 | 0.906 |
-| XGBoost (all sources), unseen system | 0.744 | 0.959 | 0.845 |
+| **XGBoost, metrics only, unseen system** (train on 2 systems, test on the 3rd) | **0.878** | 0.963 | 0.922 |
+| 1D CNN, unseen system | 0.859 | 0.930 | 0.906 |
+| XGBoost, all sources (incl. traces), unseen system | 0.744 | 0.959 | 0.845 |
 
 - **Ranker vs best rule:** +0.233 AC@1, 95% bootstrap CI [+0.178, +0.289].
 - **Fault type** (6 classes, using the service the ranker picked): accuracy 0.826, macro-F1 0.825 (0.848 with the true service). Confusions: disk ↔ memory, delay ↔ packet loss.
 - **Per fault, AC@1 of the ranker:** cpu / memory / socket 1.00, disk 0.98, delay 0.82, loss 0.84. The rule baseline got only 0.36 on delay.
-- **CNN vs XGBoost:** CNN − XGBoost AC@1 is −0.011, 95% CI [−0.037, +0.015], so no significant difference within a system. The CNN transfers better to an unseen system (0.859 vs 0.744).
+- **CNN vs XGBoost:** CNN − XGBoost AC@1 is −0.011, 95% CI [−0.037, +0.015], so no significant difference within a system. On a new system the CNN reaches 0.859, close to metrics-only XGBoost (0.878).
 - **Sources:** in grouped CV, metrics alone (0.951) are as good as metrics + logs + traces (0.944). Latency-change ranks carry most of the ranker's gain.
-- **Unseen-system drop:** comes from the trace features. Sock Shop has no traces, so when Online Boutique is held out, trace patterns are learned from Train Ticket alone (Online Boutique AC@1: 0.41). Without traces the ranker scores about 0.86 on unseen systems (0.81 on Online Boutique); notebook 04 measures this per source.
+- **Traces hurt on a new system:** AC@1 is 0.744 with traces vs 0.878 with metrics only. The loss is all on Online Boutique (0.41 vs 0.81). Sock Shop has no traces, so the trace patterns come from Train Ticket alone and don't carry over. Dropping the within-case rank features also recovers 0.867, so the trace *rank* features are what overfits. **Recommended model for a new system: metrics only.**
 
 ## Approach
 | Step | Notebook | What it does |

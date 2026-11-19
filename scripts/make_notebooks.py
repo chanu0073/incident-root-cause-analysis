@@ -496,7 +496,12 @@ print(json.dumps(results["xgb_grouped_cv_mean"], indent=1))
 """),
 ("md", """
 ### Takeaways
-*(Filled in after the full run on the training server: see notebook 06 for the final numbers and their interpretation.)*
+- **The learned ranker clearly beats every rule:** AC@1 0.944 ± 0.010 vs 0.707 for the best rule (+0.233, 95% bootstrap CI [+0.178, +0.289]). AC@3 is 0.990, so the culprit is almost always in the top 3.
+- **It learns behaviour, not names:** with each culprit service held out as a culprit, AC@1 stays at 0.944.
+- **Hardest faults are network faults:** AC@1 is 0.82 for delay and 0.84 for loss (rule: 0.36 and 0.49). These symptoms spread to callers, so the slowest service is often not the cause. cpu, memory and socket faults reach 1.00.
+- **Traces add nothing inside a system:** metrics alone give 0.951. The ranker mostly uses *latency-change ranks* plus CPU and memory changes.
+- **Trace features hurt on a new system:** unseen-system AC@1 is 0.744 with all sources but 0.878 with metrics only. The loss is on Online Boutique (0.41 vs 0.81): Sock Shop has no traces, so the trace patterns come from Train Ticket alone and don't transfer. Removing the within-case rank features also recovers 0.867, so the *trace rank features* are what overfits. **For a new system, use the metrics-only model.**
+- **Fault type:** 0.826 accuracy end-to-end (0.848 with the true service). The mix-ups are disk ↔ memory and delay ↔ loss, which look alike physically.
 
 ➡️ Next: **05_deep_learning**: can a neural network reading the raw time series do better?
 """),
@@ -584,7 +589,10 @@ print("saved reports/results/deep_learning.json")
 """),
 ("md", """
 ### Takeaways
-*(Filled in after the full run on the training server: see notebook 06.)*
+- **The CNN is as good as XGBoost inside a system:** AC@1 0.930 vs 0.941 (same split). The difference is −0.011 with 95% CI [−0.037, +0.015], so no real difference. It needs no hand-made features.
+- **The ensemble doesn't help** (AC@1 0.930, AC@3 0.993): averaging the two scores doesn't add accuracy at the top.
+- **The CNN transfers better to a new system than XGBoost on all sources** (0.859 vs 0.744). It reads metrics only, so it has no trace problem. It is level with metrics-only XGBoost (0.878).
+- **Cost:** ~17 minutes of A100 time for the grouped CV, vs seconds for XGBoost. For this data size, the gradient-boosted ranker is the practical choice; the CNN is the evidence that the signal is in the raw series.
 """),
 ]
 
@@ -620,7 +628,17 @@ pd.DataFrame(ml["fault_type"]).T.round(3).rename_axis("fault-type classifier (6 
 """),
 ("md", """
 ## Conclusions
-*(Written after the full run on the training server.)*
+1. **Root-cause service:** a learned XGBoost ranker puts the true culprit first in **94.4%** of the 270 cases (top-3: 99.0%), vs 70.7% for the best rule, 51.1% for a BARO-style z-score and 5.5% for a random guess. The gain is significant (95% CI +17.8 to +28.9 points).
+2. **Generalisation:**
+   - A culprit service never seen as a culprit: 94.4%, no drop.
+   - A completely new system: **87.8%** with metrics-only features, 85.9% with the CNN. Adding trace features drops this to 74.4%, because trace patterns learned from one system don't transfer.
+3. **Fault type:** 82.6% accuracy over 6 fault types, end-to-end.
+4. **Where it fails:** network delay and packet loss, where the symptom spreads to the callers.
+5. **Deep learning:** a 1D CNN on raw time series matches XGBoost (93.0% vs 94.1%, not significant) without feature engineering, at much higher training cost.
+
+**Comparison with IncidentLens** (ITSM ticket closure-category prediction, accuracy 0.718):
+- RCAEval is the stronger project for a resume. Its labels are real (faults were injected, so the root cause is known), it has a published benchmark and baselines, and it was checked on unseen services and unseen systems.
+- IncidentLens shows a different skill: messy business data and a served model with API and UI.
 """),
 ]
 
