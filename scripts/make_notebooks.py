@@ -399,6 +399,23 @@ pd.concat({"rule (no training)": evaluate(base_scores), "XGBoost, unseen system"
 
 """),
 ("md", """
+### Which sources transfer to a new system?
+Sock Shop has no traces, so when Online Boutique is held out the model learns trace patterns from Train Ticket alone. Repeat the unseen-system test with each feature set to see which sources carry over.
+"""),
+("code", """
+def loso_scores(cols):
+    out = []
+    for _, tr_c, te_c in leave_one_system_out(cases):
+        m = fit_ranker(df[df["case"].isin(tr_c)], cols, DEVICE, seed=0)
+        te = df[df["case"].isin(te_c)][["case", "system", "service", "is_rc"]].copy(); te["score"] = m.predict(df.loc[te.index, cols])
+        out.append(te)
+    return pd.concat(out)
+
+loso_src = {name: loso if cols == ALL else loso_scores(cols) for name, cols in sets.items()}
+loso_ac1 = pd.DataFrame({name: evaluate(o)["AC@1"] for name, o in loso_src.items()}).T
+loso_ac1.round(3).rename_axis("unseen-system AC@1")
+"""),
+("md", """
 ## Shortcut check: can it find a culprit it has never seen as a culprit?
 Each system has only 5 services that the benchmark ever breaks. A model could cheat by learning to recognise *those 5 services* (e.g. by which metrics they expose) instead of learning failure behaviour. To rule this out we hold out **all cases of one root-cause service** (all its faults and repetitions), train on the rest, and test on the held-out ones, 15 times. In training, that service only ever appears as an *innocent* service.
 """),
@@ -469,6 +486,7 @@ results = {"has_traces": has_traces, "device": DEVICE,
            "xgb_by_system_seed0": evaluate(seed0).round(4).to_dict(orient="index"),
            "xgb_leave_one_system_out": evaluate(loso).round(4).to_dict(orient="index"),
            "xgb_leave_one_rc_service_out": evaluate(lorso).round(4).to_dict(orient="index"),
+           "xgb_loso_by_source": {k: evaluate(o).round(4).to_dict(orient="index") for k, o in loso_src.items()},
            "bootstrap_xgb_minus_rule": {k: list(map(float, v)) for k, v in boot.items()},
            "ablation": pd.DataFrame(abl).T.round(4).to_dict(orient="index"),
            "fault_type": {k: {m: round(v, 4) for m, v in d.items()} for k, d in fault_res.items()}}
@@ -587,6 +605,8 @@ rows = {"random (expected)": base["overall"]["random (expected)"],
         "XGBoost ranker (grouped CV, mean of 3)": ml["xgb_grouped_cv_mean"],
         "XGBoost ranker, unseen system": ml["xgb_leave_one_system_out"]["all"],
         "XGBoost ranker, unseen culprit service": ml["xgb_leave_one_rc_service_out"]["all"]}
+for src, r in ml.get("xgb_loso_by_source", {}).items():
+    rows[f"XGBoost, unseen system, {src}"] = r["all"]
 if dl:
     rows["1D CNN (grouped CV)"] = dl["cnn_grouped_cv"]["all"]
     rows["XGBoost + CNN ensemble"] = dl["ensemble_xgb_cnn"]["all"]
