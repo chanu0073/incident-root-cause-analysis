@@ -4,7 +4,7 @@ When a microservice system fails, find **which service caused it** and **what ki
 
 **Data:** the public [RCAEval](https://github.com/phamquiluan/RCAEval) benchmark (WWW 2025), suite **RE2**: 270 real failure cases from three systems (Online Boutique, Sock Shop, Train Ticket). Six fault types were injected on purpose (CPU, memory, disk, network delay, packet loss, socket), so every case has a **true root-cause label**.
 
-**Status:** complete. Full run (metrics + logs + traces, XGBoost and CNN) on an NVIDIA A100, see [TRAINING.md](TRAINING.md).
+**Status:** full run (metrics + logs + traces, XGBoost and CNN) on an NVIDIA A100, see [TRAINING.md](TRAINING.md). The data preparation was rewritten in pandas (notebook 02), which also fixed how perfectly flat metrics are scaled; the numbers below are from the run before that change and are updated after the next server run.
 
 ## Results (270 cases, true culprit among 12 / 15 / 68 candidate services)
 | Method | AC@1 | AC@3 | MRR |
@@ -28,10 +28,12 @@ When a microservice system fails, find **which service caused it** and **what ki
 - **Traces hurt on a new system:** AC@1 is 0.744 with traces vs 0.878 with metrics only. The loss is all on Online Boutique (0.41 vs 0.81). Sock Shop has no traces, so the trace patterns come from Train Ticket alone and don't carry over. Dropping the within-case rank features also recovers 0.867, so the trace *rank* features are what overfits. **Recommended model for a new system: metrics only.**
 
 ## Approach
+All data work (loading, exploration, features, model inputs) is done in notebooks 01–02 with **pandas, numpy, matplotlib and seaborn** only. The modules in `src/` hold only the evaluation and the models.
+
 | Step | Notebook | What it does |
 |---|---|---|
 | Data understanding | `01_data_understanding` | case structure, systems, faults, what a failure looks like |
-| Feature engineering | `02_feature_engineering` | per service: robust z-scores of every metric type (median/IQR of the case's own normal window), log volume/error/new-template changes, trace latency and error changes, within-case ranks |
+| Data preparation | `02_feature_engineering` | **XGBoost input**, per service: robust z-scores of every metric type (median/IQR of the case's own normal window), log volume/error/new-template changes, trace latency and error changes, within-case ranks. **CNN input**: scaled 10-second metric series. Each step is shown on one example case first |
 | Baselines | `03_baselines` | rules with no training, including a BARO-style max robust z-score |
 | ML ranker | `04_ml_ranker` | XGBoost learning-to-rank on the GPU; fault-type classifier; source ablation |
 | Deep learning | `05_deep_learning` | 1D CNN on the raw per-service time series with a listwise ranking loss (PyTorch, GPU) |
@@ -49,13 +51,12 @@ When a microservice system fails, find **which service caused it** and **what ki
 
 ## Run it
 - **On a GPU server:** see [TRAINING.md](TRAINING.md). Results come back as an archive (`notebooks/` + `reports/`), not via git.
-- **Laptop (no traces):** run `make install data-light features-light notebooks`.
+- **Laptop (no traces):** run `make install data-light notebooks`.
 
 ## Layout
 ```
-src/rcalens/   data.py (loading), features.py (per-service features), evaluate.py (metrics, splits),
-               models.py (XGBoost ranker, fault classifier), dl.py (1D CNN)
-scripts/       download_data.py, build_features.py, make_notebooks.py
+src/rcalens/   evaluate.py (metrics, splits), models.py (XGBoost ranker, fault classifier), dl.py (1D CNN)
+scripts/       download_data.py, make_notebooks.py
 notebooks/     01-06
 reports/       results/*.json, figures/
 ```

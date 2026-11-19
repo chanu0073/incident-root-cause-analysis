@@ -16,6 +16,14 @@ sns.set_theme(style="whitegrid"); pd.set_option("display.width", 200); pd.set_op
 RESULTS = ROOT / "reports" / "results"; RESULTS.mkdir(parents=True, exist_ok=True)
 FIG = ROOT / "reports" / "figures"; FIG.mkdir(parents=True, exist_ok=True)
 """
+DATA_SETUP = """
+from pathlib import Path
+import numpy as np, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
+sns.set_theme(style="whitegrid"); pd.set_option("display.width", 200); pd.set_option("display.max_columns", 40)
+ROOT = Path.cwd().parent                                  # the project folder (notebooks run inside notebooks/)
+RAW, PROCESSED, FIG = ROOT / "data" / "raw", ROOT / "data" / "processed", ROOT / "reports" / "figures"
+PROCESSED.mkdir(parents=True, exist_ok=True); FIG.mkdir(parents=True, exist_ok=True)
+"""
 
 
 def write(name, cells):
@@ -54,48 +62,78 @@ RCAEval (WWW 2025 benchmark) ran three open-source demo shops/apps, deliberately
 The **label** (`root_cause_service`) is known because the fault was injected on purpose, a real ground truth, unlike most incident datasets.
 
 > **Why this matters:** in a bank's operations centre an alert says "checkout is slow", but the cause is often a *different* service. Automatically ranking the likely culprits saves the on-call engineer time.
+
+All data work in notebooks 01–02 uses only **pandas, numpy, matplotlib and seaborn**.
 """),
-("code", SETUP + """
-from rcalens.data import case_index, load_case, split_metric
-idx = case_index()
-print(len(idx), "cases")
-idx.groupby("system").agg(cases=("case", "size"), root_cause_services=("root_cause_service", "nunique"),
-                          fault_types=("fault", "nunique"), metrics=("n_metrics", "median"),
-                          log_lines=("n_logs", "median"), spans=("n_traces", "median"))
+("code", DATA_SETUP + """
+cases = pd.read_parquet(RAW / "cases.parquet")                     # the benchmark's index: one row per case
+cases = cases[cases["suite"] == "RE2"].sort_values("case").reset_index(drop=True)
+print(len(cases), "cases")
+cases[["case", "system", "root_cause_service", "fault", "repetition", "inject_time"]].head()
+"""),
+("code", """
+cases.groupby("system").agg(cases=("case", "size"), root_cause_services=("root_cause_service", "nunique"),
+                            fault_types=("fault", "nunique"), metrics=("n_metrics", "median"),
+                            log_lines=("n_logs", "median"), spans=("n_traces", "median"))
 """),
 ("md", """
 **Reading the table:** 90 cases per system = 5 root-cause services × 6 fault types × 3 repetitions. Train Ticket is much bigger (360+ metric columns, ~1M spans per case). Sock Shop has no traces (0 spans).
 """),
 ("code", """
-pd.crosstab([idx["system"], idx["root_cause_service"]], idx["fault"])
+pd.crosstab([cases["system"], cases["root_cause_service"]], cases["fault"])
 """),
 ("md", """
 Every (service, fault) pair appears exactly 3 times. **Important consequence for evaluation:** the 3 repetitions are near-copies of each other. If one repetition is in training and another in test, the model can "recognise" the case instead of reasoning about it. So our splits always keep all 3 repetitions together (notebook 04).
 
+## One case up close: a CPU fault on `checkoutservice`
+Each case folder has `metrics.parquet`, `logs.parquet` and (except Sock Shop) `traces.parquet`. The metrics file is **wide**: one row per second, one column per `<service>_<metric>`.
+"""),
+("code", """
+example = cases[cases["case"] == "re2ob_checkoutservice_cpu_1"].iloc[0]
+wide = pd.read_parquet(RAW / example["case"] / "metrics.parquet")
+print(wide.shape)
+wide.iloc[:3, :6]
+"""),
+("md", """
+Analysis is easier in **long** format: one row per (second, service, metric).
+- `melt` stacks all the metric columns into two columns: the column name and the value.
+- `str.rsplit("_", n=1)` splits `checkoutservice_cpu` at the **last** underscore into service and metric (metric names like `latency-50` contain no underscore).
+"""),
+("code", """
+long = wide.melt(id_vars="time", var_name="column", value_name="value")
+long[["service", "metric"]] = long["column"].str.rsplit("_", n=1, expand=True)
+long["minute"] = (long["time"] - example["inject_time"]) / 60          # 0 = the moment the fault is injected
+print(long.shape, "| services:", long["service"].nunique(), "| metric types:", sorted(long["metric"].unique()))
+long.head()
+"""),
+("md", """
 ## What the model must choose from
 For each case the candidate list is **every service that has metrics**, not just the 5 that the benchmark happens to break (using that list would be cheating: in real life you don't know which 5 services will fail).
 """),
 ("code", """
-cand = {s: len(load_case(idx.loc[idx.system == s, "case"].iloc[0], traces=False).services) for s in ["ob", "ss", "tt"]}
-rand = {s: {"candidates": n, "random top-1": 1 / n, "random top-3": min(3, n) / n} for s, n in cand.items()}
-pd.DataFrame(rand).T.round(3)
+def n_services(case):
+    columns = pd.read_parquet(RAW / case / "metrics.parquet").columns.drop("time")
+    return columns.str.rsplit("_", n=1).str[0].nunique()
+
+n = cases.groupby("system")["case"].first().map(n_services)          # one case per system is enough
+pd.DataFrame({"candidates": n, "random top-1": 1 / n, "random top-3": 3 / n}).round(3)
 """),
 ("md", """
 A random guess finds the culprit first time 8% (Online Boutique), 7% (Sock Shop) or **1.5%** (Train Ticket) of the time. That's the floor.
 
-## Look at one failure: a CPU fault on `checkoutservice`
+## What does the failure look like?
+Each line is one service; the root cause is red.
 """),
 ("code", """
-c = load_case("re2ob_checkoutservice_cpu_1")
-m = c.metrics.copy(); m["minute"] = (m["time"] - c.inject_time) / 60
+long["role"] = np.where(long["service"] == example["root_cause_service"], "root cause", "other services")
 fig, axes = plt.subplots(1, 3, figsize=(15, 3.6), sharex=True)
-for ax, typ in zip(axes, ["cpu", "mem", "latency-90"]):
-    for col in [k for k in m.columns if k.endswith("_" + typ)]:
-        svc = split_metric(col)[0]
-        ax.plot(m["minute"], m[col], lw=2.2 if svc == "checkoutservice" else 0.7,
-                color="#c0392b" if svc == "checkoutservice" else "#9aa7b4", label="checkoutservice" if svc == "checkoutservice" else None)
-    ax.axvline(0, color="k", ls="--", lw=1); ax.set_title(typ); ax.set_xlabel("minutes from fault injection")
-axes[0].legend(); plt.tight_layout(); plt.savefig(FIG / "example_cpu_fault.png", dpi=120); plt.show()
+for ax, metric in zip(axes, ["cpu", "mem", "latency-90"]):
+    sns.lineplot(data=long[long["metric"] == metric], x="minute", y="value", units="service", estimator=None,
+                 hue="role", hue_order=["other services", "root cause"], palette=["#9aa7b4", "#c0392b"],
+                 size="role", sizes={"other services": 0.7, "root cause": 2.2}, legend=(metric == "cpu"), ax=ax)
+    ax.axvline(0, color="k", ls="--", lw=1)
+    ax.set_title(metric); ax.set_xlabel("minutes from fault injection"); ax.set_ylabel("")
+plt.tight_layout(); plt.savefig(FIG / "example_cpu_fault.png", dpi=120); plt.show()
 """),
 ("md", """
 The red line (the root cause) jumps in CPU right at the injection (dashed line). Other services barely move. **But it is not always this clean:**
@@ -108,15 +146,23 @@ That is why we compute several kinds of evidence per service and let a model lea
 ## Logs and traces around the injection
 """),
 ("code", """
-lg = c.logs.copy(); lg["minute"] = (lg["timestamp"].astype("int64") - c.inject_time) // 60
-per_min = lg.groupby(["minute", "container_name"]).size().unstack(fill_value=0)
-ax = per_min[per_min.sum().sort_values(ascending=False).index[:6]].plot(figsize=(10, 3.4), lw=1.2)
-ax.axvline(0, color="k", ls="--"); ax.set_ylabel("log lines / minute"); ax.set_title("log volume per container"); plt.tight_layout(); plt.show()
-if c.traces is not None:
-    t = c.traces.copy(); t["minute"] = (t["startTimeMillis"].astype("int64") // 1000 - c.inject_time) // 60
-    p95 = t.groupby(["minute", "serviceName"])["duration"].quantile(0.95).unstack()
-    ax = (p95 / 1000).plot(figsize=(10, 3.4), lw=1.2, logy=True)
-    ax.axvline(0, color="k", ls="--"); ax.set_ylabel("p95 span duration (ms)"); ax.set_title("trace latency per service"); plt.tight_layout(); plt.show()
+logs = pd.read_parquet(RAW / example["case"] / "logs.parquet")
+logs["minute"] = (logs["timestamp"] - example["inject_time"]) // 60
+per_minute = logs.groupby(["minute", "container_name"]).size().unstack(fill_value=0)
+busiest = per_minute.sum().nlargest(6).index                                # the 6 containers that log the most
+ax = per_minute[busiest].plot(figsize=(10, 3.4), lw=1.2)
+ax.axvline(0, color="k", ls="--"); ax.set_ylabel("log lines / minute"); ax.set_title("log volume per container")
+plt.tight_layout(); plt.show()
+"""),
+("code", """
+traces_file = RAW / example["case"] / "traces.parquet"
+if traces_file.exists():
+    traces = pd.read_parquet(traces_file, columns=["serviceName", "startTimeMillis", "duration"])
+    traces["minute"] = (traces["startTimeMillis"] // 1000 - example["inject_time"]) // 60
+    p95 = traces.groupby(["minute", "serviceName"])["duration"].quantile(0.95).unstack() / 1000   # microseconds -> ms
+    ax = p95.plot(figsize=(10, 3.4), lw=1.2, logy=True)
+    ax.axvline(0, color="k", ls="--"); ax.set_ylabel("p95 span duration (ms)"); ax.set_title("trace latency per service")
+    plt.tight_layout(); plt.show()
 """),
 ("md", """
 ### Takeaways
@@ -131,13 +177,23 @@ if c.traces is not None:
 # ======================================================================= 02
 NB["02_feature_engineering"] = [
 ("md", """
-# 02 · Feature engineering: "how differently did this service behave after the fault?"
+# 02 · Data preparation: from raw telemetry to model inputs
 
-Every row of our table = **one candidate service in one case**. Its features compare the 12 minutes *after* the injection with the 12 minutes *before*, using only that case's own data:
+This notebook turns the raw files into the inputs of the models, using only **pandas and numpy**:
+
+| Output (in `data/processed/`) | Used by | One row per |
+|---|---|---|
+| `service_features.parquet`: hand-made features | rules (03), XGBoost (04) | (case, candidate service) |
+| `cnn_inputs.npy` + `cnn_rows.parquet`: scaled time series | 1D CNN (05) | (case, service) |
+
+Every step is first shown on **one example case** (the CPU fault on `checkoutservice` from notebook 01), then the same functions run on all 270 cases.
+
+### The features: "how differently did this service behave after the fault?"
+Each feature compares the 12 minutes *after* the injection with the 12 minutes *before*, using only that case's own data:
 
 | Source | Features (per service) | Idea |
 |---|---|---|
-| Metrics | for each metric type (cpu, mem, diskio, socket, workload, error, latency-50, latency-90): **max robust z-score** after the fault, mean z-score, relative change of the mean | "how far outside its normal range did it go?" |
+| Metrics | for each metric type (cpu, mem, diskio, socket, workload, latency-50, latency-90, error): **max robust z-score** after the fault, mean z-score, relative change of the mean | "how far outside its normal range did it go?" |
 | Logs | change in log volume, change in error-like lines, share of log *templates* never seen before the fault | "did it start complaining, or go quiet?" |
 | Traces | change in span count, p50/p95 latency change, worst single operation's p95 change, error-rate change | "did its requests get slower or fail?" |
 | Ranks | every feature's **rank among the services of the same case** | makes systems with 12 and 68 services comparable |
@@ -149,23 +205,277 @@ For a metric, take the normal window, compute its **median** and **IQR** (spread
 - No feature uses the label, other cases, or anything after the case's own time window.
 - **Service names are not features.** Otherwise the model would just learn "the benchmark only breaks these 5 services", a shortcut that is useless in real life.
 - Features are computed per case with fixed rules (nothing is *fitted*), so they cannot leak test information into training.
-
-The features are built by `scripts/build_features.py` (parallel, ~1–3 s per case; Train Ticket is the slowest).
 """),
-("code", SETUP + """
-from rcalens.data import load_features
-df, has_traces = load_features()
-print("feature table:", df.shape, "| trace features included:", has_traces)
-print("cases:", df["case"].nunique(), "| rows per case (candidate services):", df.groupby("system")["service"].nunique().to_dict())
-df.head(3)
+("code", DATA_SETUP + """
+METRIC_TYPES = ["cpu", "mem", "diskio", "socket", "workload", "latency-50", "latency-90", "error"]
+
+cases = pd.read_parquet(RAW / "cases.parquet")
+cases = cases[cases["suite"] == "RE2"].sort_values("case").reset_index(drop=True)
+cases["pair"] = cases["system"] + "|" + cases["root_cause_service"] + "|" + cases["fault"]   # the 3 repetitions share a pair
+
+# trace features only if traces were downloaded for every Online Boutique and Train Ticket case (90 + 90)
+USE_TRACES = len(list(RAW.glob("*/traces.parquet"))) == 180
+example = cases[cases["case"] == "re2ob_checkoutservice_cpu_1"].iloc[0]
+print(len(cases), "cases | trace features:", USE_TRACES)
+"""),
+("md", """
+# Part A · Features for the rules and XGBoost
+
+## Step 1 · Metrics in long format
+As in notebook 01: `melt` the wide metrics file into one row per (second, service, metric), so every per-service calculation becomes a `groupby(["service", "metric"])`.
 """),
 ("code", """
-src = {"metrics": [c for c in df.columns if c.startswith("m_") and not c.endswith("_rank")],
-       "logs": [c for c in df.columns if c.startswith("l_") and not c.endswith("_rank")],
-       "traces": [c for c in df.columns if c.startswith("t_") and not c.endswith("_rank")]}
-cover = {s: {k: float(df.loc[df.system == s, v].notna().any(axis=1).mean()) if v else 0.0 for k, v in src.items()} for s in ["ob", "ss", "tt"]}
-print({k: len(v) for k, v in src.items()}, "raw features (+ the same number of rank features)")
-pd.DataFrame(cover).T.round(2).rename_axis("share of services with this source")
+def load_metrics(case):
+    wide = pd.read_parquet(RAW / case / "metrics.parquet")
+    long = wide.melt(id_vars="time", var_name="column", value_name="value")
+    long[["service", "metric"]] = long["column"].str.rsplit("_", n=1, expand=True)
+    long = long[long["metric"].isin(METRIC_TYPES)]
+    return long.drop(columns="column")
+
+long = load_metrics(example["case"])
+print(long.shape)
+long.head()
+"""),
+("md", """
+## Step 2 · What is "normal" for each metric?
+Split at the injection time: `before` = the 12 normal minutes, `after` = the 12 minutes with the fault. For every (service, metric) the normal window is described by:
+- **median**: the typical value,
+- **IQR** (75th − 25th percentile): the typical spread, not affected by a few spikes.
+
+If the IQR is 0 (e.g. an error counter that is always 0) we use the standard deviation instead, and if that is 0 too, a tiny number, so we never divide by zero. "0" means below 1e-9: for a perfectly flat series the computer returns rounding noise like 3e-17 instead of an exact 0.
+"""),
+("code", """
+def normal_behaviour(before):
+    g = before.groupby(["service", "metric"], sort=False)["value"]       # sort=False: keep the file's order
+    normal = pd.DataFrame({"n_before": g.count(), "median": g.median(),
+                           "iqr": g.quantile(0.75) - g.quantile(0.25),
+                           "std": g.std(ddof=0), "mean_before": g.mean()})
+    tiny = 1e-3 * np.maximum(normal["median"].abs(), 1e-3)
+    normal["spread"] = normal["iqr"].where(normal["iqr"] > 0, normal["std"])   # IQR, else std ...
+    normal["spread"] = normal["spread"].where(normal["spread"] > 1e-9, tiny)  # ... else a tiny number
+    return normal
+
+values = long.dropna(subset=["value"])
+normal = normal_behaviour(values[values["time"] < example["inject_time"]])
+normal.loc[example["root_cause_service"]].round(3)
+"""),
+("md", """
+## Step 3 · Metric features
+For every second after the fault: `z = (value − median) / spread`, i.e. "how many normal spreads away from normal" (capped at ±10,000). Then per (service, metric):
+
+| Feature | Formula | Meaning |
+|---|---|---|
+| `maxz` | log(1 + max \\|z\\|) | the most extreme moment |
+| `meanz` | signed log of the mean z | a sustained shift, with its direction (up / down) |
+| `rel` | signed log of (mean after − mean before) / \\|mean before\\| | relative change of the average |
+
+**Signed log** = sign(x) · log(1 + \\|x\\|): keeps the direction, but turns 10,000 into 9.2, so one flat metric that suddenly moves can't dominate. A (service, metric) needs at least 10 values before *and* after.
+
+Finally `unstack` turns the long result into **one row per service**: 8 metric types × 3 features = 24 columns, plus `m_all_maxz` (its most extreme metric) and `m_n_metrics` (how many metric types it has).
+"""),
+("code", """
+def signed_log(x):
+    return np.sign(x) * np.log1p(np.abs(x))
+
+METRIC_COLS = [f"m_{t.replace('-', '')}_{s}" for t in METRIC_TYPES for s in ["maxz", "meanz", "rel"]]   # m_cpu_maxz, m_cpu_meanz, ...
+MAXZ_COLS = [c for c in METRIC_COLS if c.endswith("_maxz")]
+
+def metric_features(case, inject_time):
+    values = load_metrics(case).dropna(subset=["value"])
+    before = values[values["time"] < inject_time]
+    after = values[values["time"] >= inject_time]
+    normal = normal_behaviour(before)
+
+    # z-score of every value after the fault, using the normal median / spread of its (service, metric)
+    after = after.merge(normal[["median", "spread"]], left_on=["service", "metric"], right_index=True)
+    after["z"] = ((after["value"] - after["median"]) / after["spread"]).clip(-1e4, 1e4)
+    after["abs_z"] = after["z"].abs()
+    g = after.groupby(["service", "metric"], sort=False)
+    stats = normal.join(pd.DataFrame({"n_after": g.size(), "max_abs_z": g["abs_z"].max(),
+                                      "mean_z": g["z"].mean(), "mean_after": g["value"].mean()}), how="inner")
+    stats = stats[(stats["n_before"] >= 10) & (stats["n_after"] >= 10)]
+
+    stats["maxz"] = np.log1p(stats["max_abs_z"])
+    stats["meanz"] = signed_log(stats["mean_z"])
+    stats["rel"] = signed_log((stats["mean_after"] - stats["mean_before"]) / (stats["mean_before"].abs() + 1e-9))
+
+    # long -> wide: one row per service, one column per (metric, feature)
+    wide = stats[["maxz", "meanz", "rel"]].unstack("metric")
+    wide = wide.reindex(stats.index.get_level_values("service").unique())          # keep the services in the file's order
+    wide.columns = [f"m_{metric.replace('-', '')}_{feature}" for feature, metric in wide.columns]   # ('maxz', 'cpu') -> 'm_cpu_maxz'
+    wide = wide.reindex(columns=METRIC_COLS)
+    wide["m_all_maxz"] = wide[MAXZ_COLS].max(axis=1)
+    wide["m_n_metrics"] = wide[MAXZ_COLS].notna().sum(axis=1)
+    wide.index.name = "service"
+    return wide
+
+m = metric_features(example["case"], example["inject_time"])
+print(m.shape, "(services, metric features)")
+m.sort_values("m_all_maxz", ascending=False).head(5).round(2)
+"""),
+("md", """
+## Step 4 · Log features
+Per service, the 12 minutes after the fault against the 12 minutes before:
+
+| Feature | Meaning |
+|---|---|
+| `l_rate_ratio` | log of (lines per second after / before): did it start talking a lot, or go quiet? |
+| `l_err_ratio` | the same for **error-like lines** (*error, exception, fail, timeout, refused, unavailable, denied* or a 5xx code) |
+| `l_err_share_post` | share of its lines after the fault that are error-like |
+| `l_new_tmpl_share` | share of its lines after the fault whose **template** never appeared before |
+
+A *template* is the message with numbers and long hex IDs replaced by `#`, so `took 35 ms` and `took 812 ms` count as the same message. The small constants (0.1, 0.01) avoid log(0) for services that log nothing.
+
+Service names differ between sources (`frontend` in metrics, `frontendservice` in traces), so they are **normalised** before matching: lower case, letters and digits only, the word "service" removed.
+"""),
+("code", """
+def normalise(names):
+    return names.str.lower().str.replace(r"[^a-z0-9]", "", regex=True).str.replace("service", "")
+
+# \\b = whole word; (?: ) only groups the alternatives; 5\\d\\d = 500-599
+ERROR_PATTERN = r"\\b(?:error|exception|fail|failed|failure|timeout|timed out|refused|unavailable|denied|5\\d\\d)\\b"
+LOG_COLS = ["l_rate_ratio", "l_err_ratio", "l_err_share_post", "l_new_tmpl_share"]
+
+def log_features(row, services):
+    path = RAW / row["case"] / "logs.parquet"
+    if not path.exists():                                     # one Train Ticket case has no logs
+        return pd.DataFrame(index=services)
+    logs = pd.read_parquet(path)
+    logs["key"] = normalise(logs["container_name"])
+    logs["is_after"] = logs["timestamp"] >= row["inject_time"]
+    logs["is_error"] = logs["message"].str.contains(ERROR_PATTERN, case=False, regex=True)
+    logs["template"] = logs["message"].str.replace(r"[0-9a-fA-F]{8,}|\\d+", "#", regex=True).str.slice(0, 120)
+
+    before, after = logs[~logs["is_after"]], logs[logs["is_after"]]
+    seen = before[["key", "template"]].drop_duplicates().assign(seen_before=True)   # templates each service used before
+    after = after.merge(seen, on=["key", "template"], how="left")
+    after["new_template"] = after["seen_before"].isna()
+
+    f = pd.DataFrame({"lines_before": before.groupby("key").size(),
+                      "lines_after": after.groupby("key").size(),
+                      "errors_before": before.groupby("key")["is_error"].sum(),
+                      "errors_after": after.groupby("key")["is_error"].sum(),
+                      "new_after": after.groupby("key")["new_template"].sum()}).fillna(0)
+    sec_before = max(row["inject_time"] - row["time_start"], 1)
+    sec_after = max(row["time_end"] - row["inject_time"] + 1, 1)
+    f["l_rate_ratio"] = np.log((f["lines_after"] / sec_after + 0.1) / (f["lines_before"] / sec_before + 0.1))
+    f["l_err_ratio"] = np.log((f["errors_after"] / sec_after + 0.01) / (f["errors_before"] / sec_before + 0.01))
+    f["l_err_share_post"] = (f["errors_after"] / f["lines_after"]).fillna(0)
+    f["l_new_tmpl_share"] = (f["new_after"] / f["lines_after"]).fillna(0)
+    return f[LOG_COLS].astype(float).reindex(normalise(services)).set_axis(services)   # back to the metric service names
+
+l = log_features(example, m.index)
+l.sort_values("l_err_ratio", ascending=False).head(5).round(2)
+"""),
+("md", """
+## Step 5 · Trace features
+A *span* is one request handled by one service, with its duration and status. Per service, after against before:
+
+| Feature | Meaning |
+|---|---|
+| `t_count_ratio` | log of (spans after + 1) / (spans before + 1) |
+| `t_p50_ratio`, `t_p95_ratio` | log ratio of the median / 95th-percentile span duration |
+| `t_worst_op_p95_ratio` | the same p95 ratio for its **worst single operation** (one slow endpoint can hide in the average) |
+| `t_err_rate_diff` | error rate after − error rate before |
+
+With fewer than 20 spans before or after, percentiles are unreliable, so only the count change is kept. Sock Shop has no traces, so these features are missing there.
+"""),
+("code", """
+TRACE_COLS = ["t_count_ratio", "t_p50_ratio", "t_p95_ratio", "t_worst_op_p95_ratio", "t_err_rate_diff"]
+
+def trace_features(row, services):
+    path = RAW / row["case"] / "traces.parquet"
+    if not path.exists():                                     # Sock Shop, or traces not downloaded
+        return pd.DataFrame(index=services)
+    tr = pd.read_parquet(path, columns=["serviceName", "operationName", "startTimeMillis", "duration", "statusCode"])
+    tr["key"] = normalise(tr["serviceName"])
+    tr["is_after"] = tr["startTimeMillis"] / 1000 >= row["inject_time"]
+    tr["is_error"] = tr["statusCode"].fillna(0) != 0
+    tr["duration"] = tr["duration"].astype(float)
+
+    before, after = tr[~tr["is_after"]].groupby("key"), tr[tr["is_after"]].groupby("key")
+    f = pd.DataFrame({"spans_before": before.size(), "spans_after": after.size(),
+                      "p50_before": before["duration"].median(), "p50_after": after["duration"].median(),
+                      "p95_before": before["duration"].quantile(0.95), "p95_after": after["duration"].quantile(0.95),
+                      "err_before": before["is_error"].mean(), "err_after": after["is_error"].mean()})
+    f[["spans_before", "spans_after"]] = f[["spans_before", "spans_after"]].fillna(0)
+
+    # p95 of every (service, operation) before and after -> the operation that slowed down most
+    op = tr.groupby(["key", "operationName", "is_after"])["duration"].quantile(0.95).unstack("is_after")
+    op_change = np.log((op[True] + 1) / (op[False] + 1))
+
+    f["t_count_ratio"] = np.log((f["spans_after"] + 1) / (f["spans_before"] + 1))
+    f["t_p50_ratio"] = np.log((f["p50_after"] + 1) / (f["p50_before"] + 1))
+    f["t_p95_ratio"] = np.log((f["p95_after"] + 1) / (f["p95_before"] + 1))
+    f["t_worst_op_p95_ratio"] = op_change.groupby("key").max()
+    f["t_err_rate_diff"] = f["err_after"] - f["err_before"]
+    few = (f["spans_before"] < 20) | (f["spans_after"] < 20)
+    f.loc[few, ["t_p50_ratio", "t_p95_ratio", "t_worst_op_p95_ratio", "t_err_rate_diff"]] = np.nan
+    return f[TRACE_COLS].astype(float).reindex(normalise(services)).set_axis(services)
+
+t = trace_features(example, m.index)
+t.sort_values("t_p95_ratio", ascending=False).head(5).round(2)
+"""),
+("md", """
+## Step 6 · All sources together, for all 270 cases
+`case_features` joins the three tables: one row per candidate service (every service with valid metrics). The loop runs it on every case. Searching the log text is the slow part (Train Ticket logs are ~180 MB of text per case), so this takes roughly 15–25 minutes.
+"""),
+("code", """
+def case_features(row):
+    f = metric_features(row["case"], row["inject_time"])
+    f = f.join(log_features(row, f.index))
+    if USE_TRACES:
+        f = f.join(trace_features(row, f.index))
+    f["case"] = row["case"]
+    return f
+
+example_features = case_features(example)
+print(example_features.shape)
+example_features.loc[[example["root_cause_service"]]].round(2)
+"""),
+("code", """
+parts = []
+for i, row in cases.iterrows():
+    parts.append(case_features(row))
+    if (i + 1) % 30 == 0:
+        print(f"{i + 1}/{len(cases)} cases done")
+features = pd.concat(parts).reset_index()
+features.shape
+"""),
+("md", """
+### Within-case ranks, then the labels
+Systems have 12–68 services, so a raw value like "max z = 6" means different things in different systems. For every feature we add its **percentile rank inside its case**: `groupby("case").rank(pct=True)` of the absolute value, where 1.0 = the most extreme service of that case.
+
+Then the labels: `is_rc = 1` for the true root-cause service. This is the only place the label is used.
+"""),
+("code", """
+raw_cols = [c for c in features.columns if c.startswith(("m_", "l_", "t_")) and c != "m_n_metrics"]
+ranks = features[raw_cols].abs().groupby(features["case"]).rank(pct=True)
+features = features.join(ranks.add_suffix("_rank"))
+features["n_services"] = features.groupby("case")["service"].transform("size")
+
+labels = cases[["case", "system", "fault", "pair", "repetition", "root_cause_service"]]
+features = features.merge(labels, on="case", how="left")
+features["is_rc"] = (features["service"] == features["root_cause_service"]).astype(int)
+features.insert(0, "case", features.pop("case"))                    # move "case" to the first column
+
+# every case is there, and its root-cause service is one of its candidates
+assert features["case"].nunique() == len(cases)
+assert features.groupby("case")["is_rc"].sum().eq(1).all()
+features.to_parquet(PROCESSED / "service_features.parquet", index=False)
+print("saved", features.shape, "-> data/processed/service_features.parquet")
+features.head(3)
+"""),
+("md", """
+## Look at the result
+How many services have each source of evidence?
+"""),
+("code", """
+raw = features.loc[:, ~features.columns.str.endswith("_rank")]
+has = pd.DataFrame({"metrics": raw.filter(regex="^m_").notna().any(axis=1),
+                    "logs": raw.filter(regex="^l_").notna().any(axis=1),
+                    "traces": raw.filter(regex="^t_").notna().any(axis=1)})
+has.groupby(features["system"]).mean().round(2).rename_axis("share of services with this source")
 """),
 ("md", """
 Not every service has every source: some services write no logs, Sock Shop has no traces, databases have no latency metrics. **XGBoost handles missing values natively**, so we keep them as missing instead of inventing values.
@@ -175,9 +485,8 @@ Not every service has every source: some services write no logs, Sock Shop has n
 ("code", """
 fig, axes = plt.subplots(1, 3, figsize=(15, 3.6))
 for ax, col in zip(axes, ["m_all_maxz", "m_all_maxz_rank", "l_err_ratio"]):
-    if col in df:
-        sns.boxplot(data=df, x="system", y=col, hue=df["is_rc"].map({0: "other service", 1: "root cause"}), ax=ax, fliersize=1)
-        ax.set_title(col); ax.legend(fontsize=8)
+    sns.boxplot(data=features, x="system", y=col, hue=features["is_rc"].map({0: "other service", 1: "root cause"}), ax=ax, fliersize=1)
+    ax.set_title(col); ax.legend(fontsize=8)
 plt.tight_layout(); plt.show()
 """),
 ("md", """
@@ -186,9 +495,8 @@ The root cause usually has the most extreme metric change in its case (rank clos
 ## Which metric reacts to which fault? (root-cause services only)
 """),
 ("code", """
-rc = df[df["is_rc"] == 1]
-types = [c for c in df.columns if c.startswith("m_") and c.endswith("_maxz") and c != "m_all_maxz"]
-heat = rc.groupby("fault")[types].median().rename(columns=lambda c: c[2:-5])
+rc = features[features["is_rc"] == 1]
+heat = rc.groupby("fault")[MAXZ_COLS].median().rename(columns=lambda c: c[2:-5])     # 'm_cpu_maxz' -> 'cpu'
 plt.figure(figsize=(9, 3.8)); sns.heatmap(heat, annot=True, fmt=".1f", cmap="Reds")
 plt.title("median log(1 + max |z|) of the root-cause service, by fault type"); plt.tight_layout()
 plt.savefig(FIG / "fault_signatures.png", dpi=120); plt.show()
@@ -196,9 +504,69 @@ plt.savefig(FIG / "fault_signatures.png", dpi=120); plt.show()
 ("md", """
 **This is the "signature" of each fault:** CPU faults show up in `cpu`, memory faults in `mem`, disk faults in `diskio`, while **delay / loss** faults mostly show in latency and are the hard ones (the latency also rises in the services that call the culprit). These signatures are also what lets us classify the **fault type** (notebook 04).
 
+# Part B · Input for the deep-learning model (notebook 05)
+The CNN does not use the features above; it reads the **time series** itself. For every (case, service):
+1. scale each metric with the same normal median / spread as in Step 2: `z = (value − median) / spread` (missing values → 0), then the signed log;
+2. average into **10-second steps** over the 12 minutes before and the 12 minutes after the injection → **144 steps**, fault in the middle;
+3. stack the 8 metric types as 8 *channels* (like the colour channels of an image), plus 8 **presence channels** (1 if the service has that metric type), so the network can tell "flat" from "not measured".
+
+Result per case: an array of shape (services, 16 channels, 144 steps).
+"""),
+("code", """
+STEP, HALF = 10, 720                     # 10-second steps; 720 s = 12 minutes on each side of the injection
+N_STEPS = 2 * HALF // STEP               # 144
+
+def cnn_input(case, inject_time):
+    long = load_metrics(case)
+    normal = normal_behaviour(long[long["time"] < inject_time].dropna(subset=["value"]))
+    normal = normal[normal["n_before"] >= 10]
+
+    long = long.merge(normal[["median", "spread"]], left_on=["service", "metric"], right_index=True, how="left")
+    long["z"] = signed_log(((long["value"] - long["median"]) / long["spread"]).fillna(0).clip(-1e4, 1e4))
+    long["step"] = (long["time"] - (inject_time - HALF)) // STEP
+    long = long[(long["step"] >= 0) & (long["step"] < N_STEPS)]
+
+    services = sorted(long["service"].unique())
+    grid = pd.MultiIndex.from_product([services, METRIC_TYPES], names=["service", "metric"])   # every (service, metric)
+    values = long.groupby(["service", "metric", "step"])["z"].mean().unstack("step")
+    values = values.reindex(index=grid, columns=range(N_STEPS)).fillna(0)
+    present = normal["n_before"].reindex(grid).notna().astype(float)
+
+    values = values.to_numpy().reshape(len(services), len(METRIC_TYPES), N_STEPS)
+    present = np.repeat(present.to_numpy().reshape(len(services), len(METRIC_TYPES), 1), N_STEPS, axis=2)
+    return services, np.concatenate([values, present], axis=1).astype("float32")
+
+services, X = cnn_input(example["case"], example["inject_time"])
+print("array:", X.shape, "= (services, channels, time steps)")
+fig, axes = plt.subplots(1, 2, figsize=(15, 3.2))
+for ax, name in zip(axes, [example["root_cause_service"], "frontend"]):
+    sns.heatmap(X[services.index(name), :8], ax=ax, cmap="RdBu_r", center=0, yticklabels=METRIC_TYPES, xticklabels=24)
+    ax.axvline(N_STEPS // 2, color="k", ls="--")
+    ax.set_title(f"{name}: what the CNN sees"); ax.set_xlabel("10-second step (fault injected at step 72)")
+plt.tight_layout(); plt.savefig(FIG / "cnn_input_example.png", dpi=120); plt.show()
+"""),
+("code", """
+arrays, rows = [], []
+for i, row in cases.iterrows():
+    services, X = cnn_input(row["case"], row["inject_time"])
+    arrays.append(X)
+    rows.append(pd.DataFrame({"case": row["case"], "service": services}))
+    if (i + 1) % 90 == 0:
+        print(f"{i + 1}/{len(cases)} cases done")
+
+cnn_rows = pd.concat(rows, ignore_index=True).merge(cases[["case", "system", "pair", "root_cause_service"]], on="case")
+cnn_rows["is_rc"] = (cnn_rows["service"] == cnn_rows["root_cause_service"]).astype(int)
+cnn_X = np.concatenate(arrays)
+assert len(cnn_rows) == len(cnn_X) and cnn_rows.groupby("case")["is_rc"].sum().eq(1).all()
+np.save(PROCESSED / "cnn_inputs.npy", cnn_X)
+cnn_rows.to_parquet(PROCESSED / "cnn_rows.parquet", index=False)
+print("saved", cnn_X.shape, "-> data/processed/cnn_inputs.npy (+ cnn_rows.parquet: the case and service of each row)")
+"""),
+("md", """
 ### Recap
-- One row per (case, candidate service), ~95 features from three sources, plus within-case ranks.
-- Robust (median/IQR) statistics of each case's own normal window; no labels, no service names.
+- **XGBoost input:** one row per (case, candidate service), 26 metric + 4 log + 5 trace features, plus their within-case ranks.
+- **CNN input:** per (case, service) a 16 × 144 array of scaled metric series.
+- Both use robust (median / spread) statistics of each case's own normal window; no labels, no service names, nothing fitted.
 
 ➡️ Next: **03_baselines**: how far do simple rules get?
 """),
@@ -234,36 +602,38 @@ Ties are counted *pessimistically* (if the culprit shares the top score with 4 o
 These rules use **all 270 cases** (no training, so no split needed).
 """),
 ("code", SETUP + """
-from rcalens.data import load_features
-from rcalens.evaluate import evaluate, true_ranks, rank_metrics
-df, has_traces = load_features()
-rng = np.random.default_rng(0)
+from rcalens.evaluate import evaluate, true_ranks
+df = pd.read_parquet(ROOT / "data" / "processed" / "service_features.parquet")
+has_traces = bool(df.columns.str.startswith("t_").any())
 
-def with_score(values):
-    d = df[["case", "system", "service", "is_rc"]].copy(); d["score"] = np.nan_to_num(np.asarray(values, float), nan=-1e9); return d
-
-z = lambda cols: df[[c for c in cols if c in df]].max(axis=1)
-rules = {
+# one score column per rule: higher = more likely the root cause
+scores = pd.DataFrame({
     "max metric z (BARO-style)": df["m_all_maxz"],
-    "latency only": z(["m_latency50_maxz", "m_latency90_maxz"]),
-    "resource only (cpu/mem/disk/socket)": z(["m_cpu_maxz", "m_mem_maxz", "m_diskio_maxz", "m_socket_maxz"]),
-    "log errors": df.get("l_err_ratio", pd.Series(np.nan, index=df.index)),
-    "rank average (all features)": df[[c for c in df.columns if c.endswith("_rank")]].mean(axis=1),
-}
+    "latency only": df[["m_latency50_maxz", "m_latency90_maxz"]].max(axis=1),
+    "resource only (cpu/mem/disk/socket)": df[["m_cpu_maxz", "m_mem_maxz", "m_diskio_maxz", "m_socket_maxz"]].max(axis=1),
+    "log errors": df["l_err_ratio"],
+    "rank average (all features)": df.loc[:, df.columns.str.endswith("_rank")].mean(axis=1),
+})
 if has_traces:
-    rules["trace p95"] = df["t_p95_ratio"]
+    scores["trace p95"] = df["t_p95_ratio"]
+scores = scores.fillna(-1e9)                              # no evidence -> bottom of the ranking
 
-# random: expected metrics computed exactly from the number of candidates
-n_cand = df.groupby("case").size()
-exp_rand = {f"AC@{k}": float(np.mean(np.minimum(k, n_cand) / n_cand)) for k in (1, 3, 5)}
-exp_rand["Avg@5"] = float(np.mean([np.mean(np.minimum(k, n_cand) / n_cand) for k in range(1, 6)]))
-exp_rand["MRR"] = float(np.mean([(1 / np.arange(1, n + 1)).mean() for n in n_cand]))
+def scored(rule):
+    return df[["case", "system", "service", "is_rc"]].assign(score=scores[rule])
 
-tables = {"random (expected)": pd.Series(exp_rand)}
-per_system = {}
-for name, s in rules.items():
-    ev = evaluate(with_score(s)); tables[name] = ev.loc["all"]; per_system[name] = ev
-base = pd.DataFrame(tables).T
+# random guessing: expected metrics from the number of candidates n of each case
+n = df.groupby("case").size()
+top_k = pd.DataFrame({k: np.minimum(k, n) / n for k in range(1, 6)})        # chance that a random top k contains the culprit
+random_guess = pd.Series({"AC@1": top_k[1].mean(), "AC@3": top_k[3].mean(), "AC@5": top_k[5].mean(),
+                          "Avg@5": top_k.mean(axis=1).mean(),
+                          "MRR": n.map(lambda k: (1 / np.arange(1, k + 1)).mean()).mean()})
+
+overall, per_system = {"random (expected)": random_guess}, {}
+for rule in scores.columns:
+    ev = evaluate(scored(rule))                         # one row for all cases + one per system
+    overall[rule] = ev.loc["all"]
+    per_system[rule] = ev["AC@1"]
+base = pd.DataFrame(overall).T
 base.round(3)
 """),
 ("md", """
@@ -272,7 +642,7 @@ base.round(3)
 ### Per system (AC@1, top-1 accuracy)
 """),
 ("code", """
-pd.DataFrame({k: v["AC@1"] for k, v in per_system.items()}).T.round(3)
+pd.DataFrame(per_system).T.round(3)
 """),
 ("md", """
 ### Per fault type (AC@1 of the best rule)
@@ -280,16 +650,16 @@ Which faults are easy and which are hard for the rule?
 """),
 ("code", """
 best_rule = base.drop(index="random (expected)")["AC@1"].idxmax()
-r = true_ranks(with_score(rules[best_rule]))
-fault = df.drop_duplicates("case").set_index("case")["fault"]
 print("best rule:", best_rule)
-(r <= 1).groupby(fault.reindex(r.index).to_numpy()).mean().round(3).rename("AC@1").to_frame().T
+top1 = (true_ranks(scored(best_rule)) <= 1).rename("AC@1").to_frame()       # one row per case: culprit ranked first?
+top1 = top1.join(df.drop_duplicates("case").set_index("case")["fault"])
+top1.groupby("fault")["AC@1"].mean().round(3).to_frame().T
 """),
 ("code", """
 json.dump({"has_traces": has_traces, "best_rule": best_rule, "overall": base.round(4).to_dict(orient="index"),
-           "ac1_by_system": pd.DataFrame({k: v["AC@1"] for k, v in per_system.items()}).round(4).to_dict()},
+           "ac1_by_system": pd.DataFrame(per_system).round(4).to_dict()},
           open(RESULTS / "baselines.json", "w"), indent=1)
-with_score(rules[best_rule]).to_parquet(ROOT / "data" / "processed" / "baseline_scores.parquet", index=False)
+scored(best_rule).to_parquet(ROOT / "data" / "processed" / "baseline_scores.parquet", index=False)
 print("saved reports/results/baselines.json")
 """),
 ("md", """
@@ -319,10 +689,10 @@ Every case gets exactly one *out-of-fold* prediction per repetition of the CV, s
 We compare with the best rule from notebook 03 and report **bootstrap confidence intervals** for the difference.
 """),
 ("code", SETUP + """
-from rcalens.data import load_features, case_index
 from rcalens.evaluate import evaluate, true_ranks, rank_metrics, bootstrap_diff, grouped_folds, leave_one_system_out
 from rcalens.models import gpu_device, feature_columns, fit_ranker, fault_frame, fit_fault_classifier, FAULTS
-df, has_traces = load_features()
+df = pd.read_parquet(ROOT / "data" / "processed" / "service_features.parquet")      # built in notebook 02
+has_traces = bool(df.columns.str.startswith("t_").any())
 cases = df.drop_duplicates("case")[["case", "system", "pair", "fault"]].reset_index(drop=True)
 DEVICE = gpu_device()
 print("training device:", DEVICE, "| trace features:", has_traces, "| cases:", len(cases))
@@ -514,7 +884,7 @@ NB["05_deep_learning"] = [
 
 Notebook 04 used **hand-made features** (z-scores, ratios). Here a **1D convolutional neural network (CNN)** reads each service's raw metric series directly and learns its own features.
 
-**Input** per (case, service): 8 metric types × 144 time steps (24 minutes at 10-second resolution, fault injected in the middle). Each series is standardised with the median/IQR of its own normal window (same rule as notebook 02), plus 8 channels saying which metric types exist for this service.
+**Input** per (case, service): 8 metric types × 144 time steps (24 minutes at 10-second resolution, fault injected in the middle). Each series is standardised with the median/IQR of its own normal window, plus 8 channels saying which metric types exist for this service. These arrays were built in notebook 02 (Part B).
 
 **Model:** the same small CNN scores every service; inside a case, the scores go through a **softmax** ("which one of these is the culprit?") and the loss is the cross-entropy with the true culprit. This is called a *listwise* ranking loss. Because the network is shared across services, it learns what a *culprit-like pattern* looks like, never the service names.
 
@@ -524,19 +894,21 @@ Notebook 04 used **hand-made features** (z-scores, ratios). Here a **1D convolut
 """),
 ("code", SETUP + """
 import torch, time
-from rcalens.data import case_index
-from rcalens.dl import build_dataset, train_cnn, score_cases
+from rcalens.dl import to_cases, train_cnn, score_cases
 from rcalens.evaluate import evaluate, true_ranks, bootstrap_diff, grouped_folds, leave_one_system_out
-idx = case_index()
+X = np.load(ROOT / "data" / "processed" / "cnn_inputs.npy")                  # built in notebook 02
+rows = pd.read_parquet(ROOT / "data" / "processed" / "cnn_rows.parquet")      # case + service of each row of X
+data = to_cases(X, rows)
+cases = rows.drop_duplicates("case")[["case", "system", "pair"]].reset_index(drop=True)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("device:", DEVICE, torch.cuda.get_device_name(0) if DEVICE == "cuda" else "")
-t = time.time(); data = build_dataset(idx); print(f"tensors for {len(data)} cases built in {time.time() - t:.0f}s")
+print(f"{len(data)} cases, input array {X.shape}")
 """),
 ("code", """
 import os
 EPOCHS = int(os.environ.get("RCA_EPOCHS", 60))   # set RCA_EPOCHS=3 for a quick smoke test
 SEEDS = (0, 1, 2)                                # 3 networks per fold, averaged (an "ensemble" reduces variance)
-sys_of = idx.set_index("case")["system"]
+sys_of = cases.set_index("case")["system"]
 def run(train_cases, test_cases):
     scores = None
     for s in SEEDS:
@@ -547,7 +919,7 @@ def run(train_cases, test_cases):
     return scores
 
 t = time.time()
-cnn_cv = pd.concat([run(tr, te) for tr, te in grouped_folds(idx, n_splits=5, seed=0)])
+cnn_cv = pd.concat([run(tr, te) for tr, te in grouped_folds(cases, n_splits=5, seed=0)])
 print(f"grouped CV done in {time.time() - t:.0f}s")
 evaluate(cnn_cv).round(3)
 """),
@@ -574,7 +946,7 @@ evaluate(ens).round(3)
 ## Unseen system (leave one system out)
 """),
 ("code", """
-cnn_loso = pd.concat([run(tr, te) for _, tr, te in leave_one_system_out(idx)])
+cnn_loso = pd.concat([run(tr, te) for _, tr, te in leave_one_system_out(cases)])
 evaluate(cnn_loso).round(3)
 """),
 ("code", """

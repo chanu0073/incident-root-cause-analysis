@@ -1,6 +1,6 @@
 # Running the full pipeline on the GPU server
 
-Everything below runs from the repository root. Total time is roughly 30–60 minutes on an A100. The download is about 3.5 GB; plan for ~6 GB of free disk.
+Everything below runs from the repository root. Total time is roughly 1 hour on an A100 server. The download is about 3.5 GB; plan for ~6 GB of free disk.
 
 ## 1. Get the code and set up Python (Python 3.10+, tested with 3.12)
 ```bash
@@ -25,30 +25,27 @@ If `torch.cuda.is_available()` is `False`, install the torch build matching the 
 ```
 Ends with `done: 270 RE2 cases in .../data/raw`. If Hugging Face rate-limits you, run `export HF_TOKEN=<your token>` (free account) and re-run; finished files are skipped.
 
-## 3. Build the features (CPU, parallel)
-```bash
-.venv/bin/python scripts/build_features.py --jobs 16
-```
-Use about half of the server's CPU cores for `--jobs` (each Train Ticket case needs ~1 GB RAM). Ends with
-`270 cases, 8548 service rows, ... -> data/processed/service_features.parquet`.
-
-## 4. Run the notebooks (training on the GPU)
+## 3. Run the notebooks (data preparation, then training on the GPU)
 ```bash
 make notebooks
 ```
-Runs `notebooks/01 … 06` in order and saves the outputs inside the notebooks. Notebook 05 (the CNN) is the longest part. To run one notebook only:
+Runs `notebooks/01 … 06` in order and saves the outputs inside the notebooks:
+- **02** builds the model inputs from the raw data with pandas (`data/processed/service_features.parquet`, `cnn_inputs.npy`, `cnn_rows.parquet`). It runs on one CPU core and takes ~15–25 minutes, mostly searching the log text.
+- **04** (XGBoost) and **05** (CNN, the longest part) train on the GPU.
+
+To run one notebook only:
 ```bash
 cd notebooks && ../.venv/bin/jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 04_ml_ranker.ipynb
 ```
 
-## 5. Pack the results (nothing is pushed from the server)
+## 4. Pack the results (nothing is pushed from the server)
 ```bash
 tar czf rca_results.tgz notebooks reports
 ls -lh rca_results.tgz
 ```
 The archive holds the executed notebooks and `reports/` (`results/*.json` + `figures/`). It is small (a few MB): `data/` and `models/` are not included.
 
-## 6. Bring them to the laptop (run on the laptop)
+## 5. Bring them to the laptop (run on the laptop)
 ```bash
 cd ~/Files/projects/rcaeval-lens
 scp <user>@<server>:<path-to>/incident-root-cause-analysis/rca_results.tgz .

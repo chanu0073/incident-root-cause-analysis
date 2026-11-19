@@ -5,7 +5,6 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rcalens.evaluate import grouped_folds, rank_metrics, true_ranks  # noqa: E402
-from rcalens.features import norm_name  # noqa: E402
 
 
 def test_ties_count_against_the_model():
@@ -22,8 +21,3 @@ def test_repetitions_never_split():
     for tr, te in grouped_folds(cases, n_splits=5):
         assert not set(pair[tr]) & set(pair[te])
 
-
-def test_service_names_match_across_sources():
-    assert norm_name("frontendservice") == norm_name("frontend")
-    assert norm_name("front-end") == norm_name("frontend")
-    assert norm_name("ts-auth-service") != norm_name("ts-auth-mongo")
