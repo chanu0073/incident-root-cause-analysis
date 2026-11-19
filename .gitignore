@@ -7,3 +7,4 @@ docs/
 models/*
 !models/.gitkeep
 catboost_info/
+runs/

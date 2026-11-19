@@ -1,0 +1,93 @@
+{
+ "has_traces": true,
+ "best_rule": "rank average (all features)",
+ "overall": {
+  "random (expected)": {
+   "AC@1": 0.055,
+   "AC@3": 0.1649,
+   "AC@5": 0.2748,
+   "Avg@5": 0.1649,
+   "MRR": 0.1836
+  },
+  "max metric z (BARO-style)": {
+   "AC@1": 0.5111,
+   "AC@3": 0.8185,
+   "AC@5": 0.9222,
+   "Avg@5": 0.7726,
+   "MRR": 0.6832
+  },
+  "latency only": {
+   "AC@1": 0.5296,
+   "AC@3": 0.8407,
+   "AC@5": 0.9296,
+   "Avg@5": 0.7933,
+   "MRR": 0.7016
+  },
+  "resource only (cpu/mem/disk/socket)": {
+   "AC@1": 0.6185,
+   "AC@3": 0.7185,
+   "AC@5": 0.8,
+   "Avg@5": 0.7141,
+   "MRR": 0.6974
+  },
+  "log errors": {
+   "AC@1": 0.0778,
+   "AC@3": 0.163,
+   "AC@5": 0.1704,
+   "Avg@5": 0.1415,
+   "MRR": 0.1884
+  },
+  "rank average (all features)": {
+   "AC@1": 0.7074,
+   "AC@3": 0.9259,
+   "AC@5": 0.963,
+   "Avg@5": 0.8822,
+   "MRR": 0.8201
+  },
+  "trace p95": {
+   "AC@1": 0.4296,
+   "AC@3": 0.537,
+   "AC@5": 0.6111,
+   "Avg@5": 0.5326,
+   "MRR": 0.5242
+  }
+ },
+ "ac1_by_system": {
+  "max metric z (BARO-style)": {
+   "all": 0.5111,
+   "ob": 0.6,
+   "ss": 0.6667,
+   "tt": 0.2667
+  },
+  "latency only": {
+   "all": 0.5296,
+   "ob": 0.6556,
+   "ss": 0.7778,
+   "tt": 0.1556
+  },
+  "resource only (cpu/mem/disk/socket)": {
+   "all": 0.6185,
+   "ob": 0.7889,
+   "ss": 0.6889,
+   "tt": 0.3778
+  },
+  "log errors": {
+   "all": 0.0778,
+   "ob": 0.0,
+   "ss": 0.2,
+   "tt": 0.0333
+  },
+  "rank average (all features)": {
+   "all": 0.7074,
+   "ob": 0.6889,
+   "ss": 0.8,
+   "tt": 0.6333
+  },
+  "trace p95": {
+   "all": 0.4296,
+   "ob": 0.4889,
+   "ss": 0.0,
+   "tt": 0.8
+  }
+ }
+}
