@@ -58,5 +58,12 @@ git status --short               # should list the changed notebooks and new fil
 ```
 (Or download `rca_results.tgz` with any file-transfer tool and extract it in the project folder.) Then tell Claude the results are in; it analyses them and writes the conclusions.
 
+## Re-running after a code update (server)
+Executed notebooks count as local changes, so a plain `git pull` is refused. Reset them first (the results are already on the laptop):
+```bash
+git checkout -- notebooks reports && git pull
+git log --oneline -1               # must match the latest commit on GitHub
+```
+
 ## If something fails
 Copy the last ~30 lines of the error output to the laptop and paste them to Claude. A failed notebook does not affect the earlier ones.
