@@ -1,5 +1,5 @@
-PY ?= .venv/bin/python
-JUPYTER ?= .venv/bin/jupyter
+PY ?= $(CURDIR)/.venv/bin/python
+JUPYTER ?= $(CURDIR)/.venv/bin/jupyter
 NB = 01_data_understanding 02_feature_engineering 03_baselines 04_ml_ranker 05_deep_learning 06_conclusion
 
 .PHONY: install data data-light features features-light notebooks all
